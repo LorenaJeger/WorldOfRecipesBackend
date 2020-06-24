@@ -9,10 +9,11 @@ import mongo from 'mongodb';
 import auth from './auth.js';
 
 const app = express(); // instanciranje aplikacije
-const port = 3000; // port na kojem će web server slušati
+const port = process.env.port || 3000; // port na kojem će web server slušati
 
 app.use(cors());
 app.use(express.json());
+
 
 let checkAttributes= (data)=>{
     if (!data.naziv || !data.priprema || !data.vrijeme_pripreme || !data.inputKategorija || !data.slika){
@@ -22,7 +23,7 @@ let checkAttributes= (data)=>{
     return true;
 };
 
-app.patch('/recepti/:id', async (req, res) => {
+app.patch('/recepti/:id', [auth.verify], async (req, res) => {
   let id = req.params.id;
   let data = req.body;
 
@@ -73,7 +74,7 @@ app.get('/recepti', [auth.verify], async (req, res) => {
       let pretraga = query._any;
       let terms = pretraga.split(' ');
   
-      let atributi = ['naziv', 'sastojci' ];
+      let atributi = ['naziv', 'sastojci', 'inputKategorija' ];
   
       selekcija = {
         $and: [],
@@ -97,16 +98,12 @@ app.get('/recepti', [auth.verify], async (req, res) => {
     let cursor = await db.collection('recepti').find(selekcija);
     let results = await cursor.toArray();
     res.json(results);
-
-    // let db = await connect(); // pristup db objektu    
-    // let cursor = await db.collection("recepti").find();  
-    // let results = await cursor.toArray();
-            
-    // res.json(results) 
 });
 
+
+
 //dohvat komentara
-app.get('/recepti/:receptId/comments', async (req, res) => {
+app.get('/recepti/:receptId/comments', [auth.verify], async (req, res) => {
     let receptId = req.params.receptId;
     let db = await connect();
 
@@ -116,51 +113,37 @@ app.get('/recepti/:receptId/comments', async (req, res) => {
     res.json(results);
 });
 
-
-
-
-
-app.get('/users/:username/favoriti',  async (req, res) => {
-    let username = req.params.username;
-    let db = await connect();
-
-    console.log("povezani smo u favoritima");
-    let doc = await db.collection('favoriti').find({'username': username}); 
-    
-    /* aggregate([{
-        $lookup: {
-            from: "recepti",
-            localField: "receptId",
-            foreignField: "_id",
-            as: "recepti"
-        }
-       
-    }]) */
-    let results= await doc.toArray();
-    res.json(results);
-
-
-}); 
-
-
-
-
-
-
-
-
-
-
+//dohvat korisnikovih recepata u moji recepti
 app.get('/recepti/username/:username', [auth.verify], async (req, res) => {
     let username = req.params.username;
     let db = await connect();
     console.log("povezani smo");
-     let doc = await db.collection('recepti').find({'username': username});
+    let doc = await db.collection('recepti').find({'username': username});
     let results = await doc.toArray();
     console.log(results);
     res.json(results);
 
 }); 
+
+//dohvat korisnikovih favorita u moji favoriti
+app.get('/users/:username/favoriti', [auth.verify], async (req, res) => {
+    let username = req.params.username;
+    let db = await connect();
+
+    let rezultat = await db.collection('favoriti').aggregate([
+        { $match: {username: username} },
+        { $lookup: {
+            from: "recepti",
+            localField: "receptId",
+            foreignField: "_id",
+            as: "receptidetails"
+            }
+        }
+    ])
+    let results = await rezultat.toArray();
+    console.log(results);
+    res.json(results);
+})
 
 app.post('/auth', async (req, res) => {
     let user = req.body;
@@ -187,9 +170,38 @@ app.post('/users', async (req, res) => {
     res.json({ id: id });
 });
 
+app.patch('/users', [auth.verify], async (req, res) => {
+    console.log("Backend change password");
+    let changes = req.body;   //podaci koje korisnik šalje na promjenu
+    let username = req.jwt.username;
+
+    console.log("changes stara lozinka " + changes.old_password);
+    console.log("changes nova lozinka " + changes.new_password)
+    
+    try {
+        if(changes.new_password && changes.old_password) {
+            console.log("usao u promjenu lozinke");
+            let result = await auth.changeUserPassword(username, changes.old_password, changes.new_password);
+            if (result) {
+                res.status(201).send();
+            } else {
+                console.log("saljem gresku");
+                res.status(500).json({ error: 'cannot change password' });
+            }
+        }
+        else {
+            console.log("usao u gresku")
+            res.status(400).json({error: "krivi upit"})
+        }
+    } catch (e) {
+        console.log("nisam usao u backend " + e);
+    }
+    
+
+});
+
 app.post('/recepti', [auth.verify], async (req, res) => {
     let data= req.body;
-    //postavi vrijeme i datum posta
     //zelimo validan id pa pustamo da ga mongo postavi
     delete data._id;
 
@@ -218,7 +230,7 @@ app.post('/recepti', [auth.verify], async (req, res) => {
 });
 
 //unos komentara
-app.post('/recepti/:receptId/comments', async (req, res) => {
+app.post('/recepti/:receptId/comments', [auth.verify], async (req, res) => {
     let db = await connect();
     let doc = req.body;
     
@@ -238,12 +250,13 @@ app.post('/recepti/:receptId/comments', async (req, res) => {
 
 });
 
-app.post('/users/:username/:receptId/favoriti', async (req, res) => {
+//unos favorita
+app.post('/users/:username/:receptId/favoriti', [auth.verify], async (req, res) => {
     let db = await connect();
     let doc = req.body;
 
     doc.username = req.params.username;
-    doc.receptId = req.params.receptId;
+    doc.receptId = mongo.ObjectId(req.params.receptId);
 
     let result = await db.collection('favoriti').insertOne(doc);
     if(result.insertedCount == 1) {
@@ -259,7 +272,7 @@ app.post('/users/:username/:receptId/favoriti', async (req, res) => {
 })
 
 //brisanje komentara
-app.delete('/recepti/:receptId/comments/:commentId', async (req, res) => {
+app.delete('/recepti/:receptId/comments/:commentId', [auth.verify], async (req, res) => {
     let db = await connect();
     let commentId = req.params.commentId;
 
